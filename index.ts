@@ -2,6 +2,7 @@ import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import * as k8s from "@pulumi/kubernetes";
+import * as eks from "@pulumi/eks";
 
 // Set a variable name to be used for all resources
 const my_name = `eks-ng-issue`;
@@ -133,8 +134,26 @@ const example_AmazonEC2ContainerRegistryReadOnly =
   );
 
 // ########## CREATE EKS CLUSTER ##########
-const mycluster = new aws.eks.Cluster(`${my_name}-eks`, {
-  roleArn: eksRole.arn,
+// const mycluster = new aws.eks.Cluster(`${my_name}-eks`, {
+//   roleArn: eksRole.arn,
+//   version: "1.25",
+//   enabledClusterLogTypes: [
+//     "api",
+//     "audit",
+//     "authenticator",
+//     "controllerManager",
+//     "scheduler",
+//   ],
+//   vpcConfig: {
+//     securityGroupIds: [eksclustersecuritygroup.id],
+//     subnetIds: myvpc.publicSubnetIds,
+//   },
+// });
+
+const mycluster = new eks.Cluster(`${my_name}-eks`, {
+  // roleArn: eksRole.arn,
+  instanceRoles: [eksRole, nodeRole],
+  skipDefaultNodeGroup: true,
   version: "1.25",
   enabledClusterLogTypes: [
     "api",
@@ -143,53 +162,13 @@ const mycluster = new aws.eks.Cluster(`${my_name}-eks`, {
     "controllerManager",
     "scheduler",
   ],
-  vpcConfig: {
-    securityGroupIds: [eksclustersecuritygroup.id],
-    subnetIds: myvpc.publicSubnetIds,
-  },
+  vpcId: myvpc.vpcId,
+  subnetIds: myvpc.publicSubnetIds,
+  clusterSecurityGroup: eksclustersecuritygroup,
 });
 
 // Generate a kubeconfig for the EKS cluster.
-const mykubeconfig = pulumi
-  .all([
-    mycluster.endpoint,
-    mycluster.certificateAuthority.data,
-    mycluster.name,
-  ])
-  .apply(([endpoint, certData, clusterName]) => {
-    return {
-      apiVersion: "v1",
-      clusters: [
-        {
-          cluster: {
-            server: endpoint,
-            "certificate-authority-data": certData,
-          },
-          name: clusterName,
-        },
-      ],
-      contexts: [
-        {
-          context: { cluster: clusterName, user: "aws" },
-          name: "aws",
-        },
-      ],
-      "current-context": "aws",
-      kind: "Config",
-      users: [
-        {
-          name: "aws",
-          user: {
-            exec: {
-              apiVersion: "client.authentication.k8s.io/v1beta1",
-              command: "aws",
-              args: ["eks", "get-token", "--cluster-name", clusterName],
-            },
-          },
-        },
-      ],
-    };
-  });
+const mykubeconfig = mycluster.kubeconfig;
 
 export const kubeconfig = pulumi.secret(mykubeconfig);
 
@@ -254,26 +233,26 @@ const myapp = new k8s.apps.v1.Deployment(
 
 // Create the poddisruption budget. This will prevent the node group from updating if the poddisruption budget is not met.
 // Delete this resource after the first run when you are trying to re-create the issue.
-// const pdb = new k8s.policy.v1.PodDisruptionBudget(
-//   `${my_name}-pdb`,
-//   {
-//     metadata: { namespace: mynamespace.metadata.name },
-//     spec: {
-//     //   minAvailable: "100%",
-//       maxUnavailable: "0%",
+const pdb = new k8s.policy.v1.PodDisruptionBudget(
+  `${my_name}-pdb`,
+  {
+    metadata: { namespace: mynamespace.metadata.name },
+    spec: {
+    //   minAvailable: "100%",
+      maxUnavailable: "100%",
 
-//       selector: {
-//         matchLabels: {
-//           app: "myapp",
-//         },
-//       },
-//     },
-//   },
-//   { dependsOn: [mynamespace, mycluster], provider: k8sProvider }
-// );
+      selector: {
+        matchLabels: {
+          app: "myapp",
+        },
+      },
+    },
+  },
+  { dependsOn: [mynamespace, mycluster], provider: k8sProvider }
+);
 
-// // export the poddisruption budget name
-// export const pdb_name = pdb.metadata.name;
+// export the poddisruption budget name
+export const pdb_name = pdb.metadata.name;
 
 // Create launch template for the eks node group.
 // This is where a lot of the magic happens.  The launch template is what is used to create the instances in the node group.
@@ -281,8 +260,8 @@ const mylaunchTemplate = new aws.ec2.LaunchTemplate(
   `${my_name}-launchtemplate`,
   {
     tags: { Name: `${my_name}-launchtemplate` },
-    instanceType: "t3a.small", // Toggle this instance type with the one below so that the launch template changes versions.
-    // instanceType: "t3a.nano", // Toggle this instance type with the one above so that the launch template changes versions.
+    // instanceType: "t3a.small", // Toggle this instance type with the one below so that the launch template changes versions.
+    instanceType: "t3a.nano", // Toggle this instance type with the one above so that the launch template changes versions.
     description:
       "This is the example launch template for the EKS cluster managed node group by User A",
     updateDefaultVersion: true,
@@ -295,11 +274,9 @@ export const mylaunchTemplate_id = mylaunchTemplate.id;
 export const mylaunchTemplate_version = mylaunchTemplate.latestVersion;
 
 // create the eks node group with the launch template
-const eksnodegroup = new aws.eks.NodeGroup(`${my_name}-eksNodeGroup`, {
-  clusterName: mycluster.name,
-  //subnetIds: myvpc.publicSubnetIds, // Provide a list of subnet IDs associate with the node group
-  subnetIds: myvpc.privateSubnetIds, // Provide a list of subnet IDs associate with the node group
-  nodeRoleArn: nodeRole.arn,
+const eksnodegroup = eks.createManagedNodeGroup(`${my_name}-eksNodeGroup`, {
+  cluster: mycluster,
+  nodeRole: nodeRole,
   launchTemplate: {
     id: mylaunchTemplate.id,
     version: pulumi.interpolate`${mylaunchTemplate.latestVersion}`,

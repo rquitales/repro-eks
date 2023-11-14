@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eks-ng-issue-namespace-4ecdbc44
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eks-ng-issue-app-644fb4b7
+  namespace: eks-ng-issue-namespace-4ecdbc44
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: myapp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - args:
+        - while true; do sleep 30; done;
+        command:
+        - /bin/sh
+        - -c
+        - --
+        image: alpine:latest
+        imagePullPolicy: Always
+        name: myapp
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  annotations:
+    pulumi.com/autonamed: "true"
+  name: eks-ng-issue-pdb-79706d4b
+  namespace: eks-ng-issue-namespace-4ecdbc44
+spec:
+  maxUnavailable: 100%
+  selector:
+    matchLabels:
+      app: myapp
